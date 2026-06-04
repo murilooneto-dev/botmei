@@ -1,0 +1,22 @@
+# Dependências e ambiente
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Arquivos gerados
+DAS/
+uploads/
+dist/
+build/__pycache__/
+debug_*.png
+config.json
+
+# Distribuição
+*.zip
+
+# Credenciais
+.env
+
+# Planilhas de dados
+empresas_branco.xlsx
