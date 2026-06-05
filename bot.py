@@ -183,27 +183,17 @@ def ler_tabela_das(page) -> list[dict]:
         except Exception as e:
             log(f"     ! Erro ao ler cabeçalhos: {e}")
 
-        # ── Detecta índices pelos cabeçalhos ─────────────────────────────
-        idx_mes      = 0
-        idx_situacao = None
-        idx_total    = None
-        idx_venc     = None
+        # ── Índices baseados na estrutura real observada no portal ──────────
+        # O cabeçalho tem célula mesclada "Resumo do DAS" que desloca os
+        # índices do thead vs tbody. Usamos os índices reais das linhas de dados:
+        # [0]=vazio [1]=Mês [2]=Apurado [3]=vazio [4]=Situação
+        # [5]=Principal [6]=Multa [7]=Juros [8]=Total [9]=Vencimento [10]=Acolhimento
+        idx_mes      = 1
+        idx_situacao = 4
+        idx_total    = 8
+        idx_venc     = 9
 
-        for i, txt in enumerate(headers_txt):
-            tl = txt.lower()
-            if "situa" in tl:
-                idx_situacao = i
-            elif "total" in tl:
-                idx_total = i
-            elif "vencimento" in tl:
-                idx_venc = i
-
-        # Fallback para índices padrão observados no portal
-        if idx_situacao is None: idx_situacao = 3
-        if idx_total    is None: idx_total    = 7
-        if idx_venc     is None: idx_venc     = 8
-
-        log(f"  🔍 [DIAG] Índices usados → situação:{idx_situacao} total:{idx_total} venc:{idx_venc}")
+        log(f"  🔍 [DIAG] Índices fixos → mês:{idx_mes} situação:{idx_situacao} total:{idx_total} venc:{idx_venc}")
 
         # ── DIAGNÓSTICO: imprime todas as linhas encontradas ─────────────
         linhas = page.locator("tbody tr").all()
@@ -392,12 +382,12 @@ def emitir_mes(page, cnpj: str, mes: int, ano: int, pasta: Path) -> Path | None:
             checkbox.check()
         espera_humana(0.5, 1.0)
 
-        # Lê vencimento da própria linha se disponível
-        for cel in linha.locator("td").all():
-            t = cel.inner_text().strip()
+        # Lê vencimento da própria linha — coluna [9]
+        cels_linha = linha.locator("td").all()
+        if len(cels_linha) > 9:
+            t = cels_linha[9].inner_text().strip()
             if re.match(r"\d{2}/\d{2}/\d{4}", t):
                 data_venc = t
-                break
         log(f"  ✓ Checkbox de '{texto_mes}' marcado. Vencimento: {data_venc}")
     except Exception as e:
         log(f"  ! Erro ao marcar checkbox: {e}")
