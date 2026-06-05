@@ -349,6 +349,57 @@ def navegar_ate_tabela(page, cnpj: str, ano: int) -> bool:
     return True
 
 
+# ── Volta para a tabela sem refazer login ────────────────────────────────────
+
+def voltar_para_tabela(page, ano: int) -> bool:
+    """
+    Clica em Voltar e reseleciona o ano-calendário.
+    Usado entre emissões consecutivas do mesmo CNPJ.
+    """
+    log("  → Voltando para a tabela...")
+    try:
+        btn_voltar = encontrar_botao(page, ["Voltar", "Anterior", "Retornar", "← Voltar"])
+        if not btn_voltar:
+            # Tenta o botão back do browser
+            page.go_back()
+        else:
+            btn_voltar.click()
+        page.wait_for_load_state("domcontentloaded", timeout=15000)
+        espera_humana(1.5, 2.5)
+    except Exception as e:
+        log(f"  ! Erro ao voltar: {e}")
+        return False
+
+    # Reseleciona o ano-calendário e clica em OK
+    try:
+        for sel in ["select[id*='ano' i]", "select[name*='ano' i]", "select[id*='year' i]"]:
+            el = page.locator(sel).first
+            if el.count() > 0:
+                el.wait_for(state="visible", timeout=5000)
+                el.select_option(value=str(ano))
+                espera_humana(0.5, 1.0)
+                btn_ok = encontrar_botao(page, ["Ok", "OK", "Confirmar", "Continuar"])
+                if btn_ok:
+                    btn_ok.click()
+                    page.wait_for_load_state("domcontentloaded", timeout=15000)
+                    espera_humana(1.5, 2.5)
+                    log(f"  ✓ Voltou para a tabela. Ano {ano} selecionado.")
+                    return True
+                break
+    except Exception as e:
+        log(f"  ! Erro ao reselecionar ano: {e}")
+
+    # Se não encontrou seletor de ano, pode já estar na tabela
+    try:
+        if page.locator("tbody tr").count() > 0:
+            log("  ✓ Já está na tabela.")
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
 # ── Emissão de um mês específico ──────────────────────────────────────────────
 
 def emitir_mes(page, cnpj: str, mes: int, ano: int, pasta: Path) -> Path | None:
@@ -649,12 +700,15 @@ def executar(empresas: list, pasta_downloads: Path,
 
                     log(f"\n  📄 Emitindo {mes_info['texto']}...")
 
-                    # Se não é o primeiro mês, precisa voltar à tabela
+                    # A partir do 2º mês: volta via botão Voltar (mais rápido)
                     if idx_mes > 0:
-                        log("  → Voltando à tabela para próximo mês...")
-                        ok = navegar_ate_tabela(page, cnpj, mes_ano)
+                        ok = voltar_para_tabela(page, mes_ano)
                         if not ok:
-                            log(f"  ✗ Falha ao navegar de volta para {mes_info['texto']}.")
+                            # Fallback: refaz navegação completa
+                            log("  ! Botão Voltar falhou, refazendo navegação completa...")
+                            ok = navegar_ate_tabela(page, cnpj, mes_ano)
+                        if not ok:
+                            log(f"  ✗ Falha ao retornar para {mes_info['texto']}.")
                             continue
 
                     arquivo = emitir_mes(page, cnpj, mes_num, mes_ano, pasta)
