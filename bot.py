@@ -3,6 +3,7 @@ Bot DAS-SIMEI — lógica de automação
 Pode ser chamado via CLI (main) ou pelo app web (executar)
 """
 
+import base64
 import os
 import random
 import re
@@ -34,24 +35,32 @@ load_dotenv()
 
 URL_PGMEI = "https://www8.receita.fazenda.gov.br/SimplesNacional/Aplicacoes/ATSPO/pgmei.app/Identificacao"
 
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0",
-]
-
 MESES_PT = ["Janeiro","Fevereiro","Março","Abril","Maio","Junho",
             "Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"]
 
-# Função de log global (substituída pelo app web quando necessário)
-_log_func = print
+# ── Callbacks globais (substituídos pelo app web) ─────────────────────────────
+_log_func       = print
+_pergunta_func  = None   # fn(dados_dict) → dict resposta  — bloqueia até responder
 
-def set_log_func(func):
-    global _log_func
-    _log_func = func
+def set_log_func(func):       global _log_func;      _log_func = func
+def set_pergunta_func(func):  global _pergunta_func;  _pergunta_func = func
 
-def log(msg):
-    _log_func(msg)
+def log(msg): _log_func(msg)
+
+def perguntar(dados: dict) -> dict:
+    """Envia uma pergunta para a UI e aguarda resposta (bloqueante)."""
+    if _pergunta_func:
+        return _pergunta_func(dados) or {}
+    # CLI fallback: imprime e pede input
+    log(f"\n❓ {dados.get('titulo','Pergunta')}")
+    for m in dados.get("meses", []):
+        log(f"   [{m['num']:02d}] {m['texto']} — {m['situacao']} — {m['total']}")
+    resp = input("Deseja emitir DAS para algum mês? (s/n): ").strip().lower()
+    if resp != "s":
+        return {"emitir": False}
+    selecionados = input("Informe os números dos meses separados por vírgula: ")
+    nums = [int(x.strip()) for x in selecionados.split(",") if x.strip().isdigit()]
+    return {"emitir": True, "meses": nums}
 
 
 # ── Utilitários ───────────────────────────────────────────────────────────────
@@ -64,14 +73,17 @@ def pasta_empresa(cnpj: str, pasta_base: Path) -> Path:
     pasta.mkdir(parents=True, exist_ok=True)
     return pasta
 
-def data_vencimento_das() -> str:
-    """Vencimento = dia 20 do mês corrente (competência = mês anterior)."""
-    hoje = datetime.now()
-    venc = datetime(hoje.year, hoje.month, 20)
+def vencimento_para_mes(mes: int, ano: int) -> str:
+    """Calcula a data de vencimento para um mês/ano de competência específico."""
+    # Vencimento = dia 20 do mês seguinte
+    if mes == 12:
+        venc = datetime(ano + 1, 1, 20)
+    else:
+        venc = datetime(ano, mes + 1, 20)
     if venc.weekday() == 5:   # sábado → sexta
-        venc = venc.replace(day=18)
+        venc = venc.replace(day=venc.day - 1)
     elif venc.weekday() == 6: # domingo → sexta
-        venc = venc.replace(day=19)
+        venc = venc.replace(day=venc.day - 2)
     return venc.strftime("%d/%m/%Y")
 
 def espera_humana(minimo=0.8, maximo=2.5):
@@ -89,6 +101,13 @@ def mover_mouse_aleatoriamente(page):
     for _ in range(random.randint(2, 4)):
         page.mouse.move(random.randint(100, 900), random.randint(100, 600))
         time.sleep(random.uniform(0.1, 0.3))
+
+def screenshot_base64(page) -> str:
+    """Tira screenshot da página e retorna como base64."""
+    try:
+        return base64.b64encode(page.screenshot()).decode()
+    except Exception:
+        return ""
 
 
 # ── Detecção de elementos ─────────────────────────────────────────────────────
@@ -144,18 +163,76 @@ def diagnosticar_pagina(page, etapa: str):
         pass
 
 
-# ── Download do DAS ───────────────────────────────────────────────────────────
+# ── Leitura da tabela de DAS ──────────────────────────────────────────────────
 
-def baixar_das(page, cnpj: str, pasta: Path) -> Path | None:
+def ler_tabela_das(page) -> list[dict]:
+    """
+    Lê todas as linhas da tabela de períodos de apuração.
+    Retorna lista de dicts: {num, texto, situacao, principal, total, vencimento, atrasado}
+    """
+    meses = []
+    try:
+        linhas = page.locator("tbody tr").all()
+        for linha in linhas:
+            cels = linha.locator("td").all()
+            if len(cels) < 3:
+                continue
+            try:
+                # Coluna 0: checkbox + texto do mês
+                texto_periodo = cels[0].inner_text().strip()
+                # Extrai "Janeiro/2026" do texto
+                match = re.search(r"(\w+)/(\d{4})", texto_periodo)
+                if not match:
+                    continue
+                nome_mes_txt = match.group(1)
+                ano_txt      = int(match.group(2))
+                if nome_mes_txt not in MESES_PT:
+                    continue
+                num_mes = MESES_PT.index(nome_mes_txt) + 1
+
+                # Situação (procura em todas as células)
+                situacao  = ""
+                principal = ""
+                total     = ""
+                vencimento = ""
+                for cel in cels:
+                    t = cel.inner_text().strip()
+                    if t in ("Devedor", "A Vencer", "Pago", "Em Aberto"):
+                        situacao = t
+                    elif re.match(r"R\$\s*[\d.,]+", t) and not principal:
+                        principal = t
+                    elif re.match(r"R\$\s*[\d.,]+", t):
+                        total = t
+                    elif re.match(r"\d{2}/\d{2}/\d{4}", t) and not vencimento:
+                        vencimento = t
+
+                atrasado = situacao in ("Devedor", "Em Aberto")
+
+                meses.append({
+                    "num":       num_mes,
+                    "ano":       ano_txt,
+                    "texto":     f"{nome_mes_txt}/{ano_txt}",
+                    "situacao":  situacao or "—",
+                    "principal": principal,
+                    "total":     total or principal,
+                    "vencimento": vencimento,
+                    "atrasado":  atrasado,
+                })
+            except Exception:
+                continue
+    except Exception as e:
+        log(f"  ! Erro ao ler tabela: {e}")
+    return meses
+
+
+# ── Navegação até a tabela de DAS ─────────────────────────────────────────────
+
+def navegar_ate_tabela(page, cnpj: str, ano: int) -> bool:
+    """
+    Acessa o portal, preenche CNPJ, navega até a tabela de períodos.
+    Retorna True se chegou na tabela com sucesso.
+    """
     cnpj_limpo = limpar_cnpj(cnpj)
-    hoje = datetime.now()
-    mes_competencia = 12 if hoje.month == 1 else hoje.month - 1
-    ano_competencia = hoje.year - 1 if hoje.month == 1 else hoje.year
-    nome_mes = MESES_PT[mes_competencia - 1]
-    texto_mes = f"{nome_mes}/{ano_competencia}"
-    data_venc = data_vencimento_das()
-
-    log(f"  → Competência: {texto_mes} | Vencimento: {data_venc}")
 
     # ETAPA 1 — Carregar portal
     try:
@@ -163,7 +240,7 @@ def baixar_das(page, cnpj: str, pasta: Path) -> Path | None:
         espera_humana(2, 4)
     except PlaywrightTimeout:
         log("  ✗ Timeout ao carregar o portal.")
-        return None
+        return False
 
     mover_mouse_aleatoriamente(page)
     verificar_e_resolver_captcha(page)
@@ -173,7 +250,7 @@ def baixar_das(page, cnpj: str, pasta: Path) -> Path | None:
     if not campo_cnpj:
         log("  ✗ Campo CNPJ não encontrado.")
         diagnosticar_pagina(page, "sem_campo_cnpj")
-        return None
+        return False
 
     digitar_como_humano(page, campo_cnpj, cnpj_limpo)
     mover_mouse_aleatoriamente(page)
@@ -181,8 +258,7 @@ def baixar_das(page, cnpj: str, pasta: Path) -> Path | None:
     btn = encontrar_botao(page, ["Continuar", "Consultar", "Avançar"])
     if not btn:
         log("  ✗ Botão Continuar não encontrado.")
-        diagnosticar_pagina(page, "sem_botao_continuar")
-        return None
+        return False
 
     espera_humana(0.5, 1.5)
     btn.click()
@@ -194,45 +270,71 @@ def baixar_das(page, cnpj: str, pasta: Path) -> Path | None:
     btn_das = encontrar_botao(page, ["Emitir DAS", "Gerar DAS", "DAS-SIMEI", "Emitir Guia"])
     if not btn_das:
         log("  ✗ Link Emitir DAS não encontrado.")
-        diagnosticar_pagina(page, "sem_link_emitir_das")
-        return None
+        return False
 
     espera_humana(0.5, 1.0)
     btn_das.click()
     page.wait_for_load_state("domcontentloaded", timeout=15000)
     espera_humana(2, 3)
 
-    # ETAPA 4 — Selecionar Ano-Calendário
-    log(f"  → Selecionando ano-calendário: {ano_competencia}")
-    selecionou_ano = False
+    # ETAPA 4 — Selecionar Ano-Calendário + OK
+    log(f"  → Selecionando ano-calendário: {ano}")
     try:
+        selecionou = False
         for sel in ["select[id*='ano' i]", "select[name*='ano' i]", "select[id*='year' i]"]:
             el = page.locator(sel).first
             if el.count() > 0:
                 el.wait_for(state="visible", timeout=5000)
-                el.select_option(value=str(ano_competencia))
+                el.select_option(value=str(ano))
                 espera_humana(0.8, 1.5)
-                selecionou_ano = True
-                log(f"  ✓ Ano {ano_competencia} selecionado.")
+                selecionou = True
                 break
-        if not selecionou_ano:
+        if not selecionou:
             diagnosticar_pagina(page, "sem_seletor_ano")
+            return False
+
+        espera_humana(0.5, 1.0)
+        btn_ok = encontrar_botao(page, ["Ok", "OK", "Confirmar", "Continuar"])
+        if btn_ok:
+            btn_ok.click()
+            page.wait_for_load_state("domcontentloaded", timeout=15000)
+            espera_humana(2, 3)
+            log(f"  ✓ Ano {ano} selecionado.")
         else:
-            espera_humana(0.5, 1.0)
-            btn_ok = encontrar_botao(page, ["Ok", "OK", "Confirmar", "Continuar"])
-            if btn_ok:
-                btn_ok.click()
-                page.wait_for_load_state("domcontentloaded", timeout=15000)
-                espera_humana(2, 3)
-                log("  ✓ Clicou em OK.")
-            else:
-                log("  ! Botão OK não encontrado.")
-                diagnosticar_pagina(page, "sem_botao_ok_ano")
+            log("  ! Botão OK não encontrado.")
+            return False
     except Exception as e:
         log(f"  ! Erro ao selecionar ano: {e}")
+        return False
 
-    # ETAPA 5 — Marcar checkbox do mês anterior
-    log(f"  → Marcando checkbox de '{texto_mes}'...")
+    return True
+
+
+# ── Emissão de um mês específico ──────────────────────────────────────────────
+
+def emitir_mes(page, cnpj: str, mes: int, ano: int, pasta: Path) -> Path | None:
+    """
+    Marca o checkbox do mês, preenche data, gera e baixa o DAS.
+    Pressupõe que a página já está na tabela de períodos.
+    """
+    cnpj_limpo   = limpar_cnpj(cnpj)
+    nome_mes     = MESES_PT[mes - 1]
+    texto_mes    = f"{nome_mes}/{ano}"
+    data_venc    = vencimento_para_mes(mes, ano)
+    nome_arquivo = f"DAS_{cnpj_limpo}_{ano}{mes:02d}.pdf"
+    caminho      = pasta / nome_arquivo
+
+    log(f"  → Emitindo {texto_mes} | Vencimento: {data_venc}")
+
+    # Garante que nenhum checkbox esteja marcado antes
+    try:
+        for cb in page.locator("input[type='checkbox']:checked").all():
+            cb.uncheck()
+        espera_humana(0.3, 0.6)
+    except Exception:
+        pass
+
+    # Marca checkbox do mês
     try:
         linha = page.locator(f"tr:has-text('{texto_mes}')").first
         linha.wait_for(state="visible", timeout=10000)
@@ -240,21 +342,19 @@ def baixar_das(page, cnpj: str, pasta: Path) -> Path | None:
         if not checkbox.is_checked():
             checkbox.check()
         espera_humana(0.5, 1.0)
-        log(f"  ✓ Checkbox de '{texto_mes}' marcado.")
 
-        # Lê Data de Vencimento direto da linha
-        for celula in linha.locator("td").all():
-            txt = celula.inner_text().strip()
-            if re.match(r"\d{2}/\d{2}/\d{4}", txt):
-                data_venc = txt
-                log(f"  ✓ Data de vencimento lida da página: {data_venc}")
+        # Lê vencimento da própria linha se disponível
+        for cel in linha.locator("td").all():
+            t = cel.inner_text().strip()
+            if re.match(r"\d{2}/\d{2}/\d{4}", t):
+                data_venc = t
                 break
+        log(f"  ✓ Checkbox de '{texto_mes}' marcado. Vencimento: {data_venc}")
     except Exception as e:
         log(f"  ! Erro ao marcar checkbox: {e}")
-        diagnosticar_pagina(page, "sem_checkbox_mes")
+        return None
 
-    # ETAPA 6 — Preencher data de pagamento
-    log(f"  → Preenchendo data de pagamento: {data_venc}")
+    # Preenche data de pagamento
     try:
         campo_data = page.locator(
             "input[id*='dtPagamento' i], input[id*='dataPagamento' i], "
@@ -266,13 +366,10 @@ def baixar_das(page, cnpj: str, pasta: Path) -> Path | None:
         campo_data.triple_click()
         espera_humana(0.2, 0.4)
         digitar_como_humano(page, campo_data, data_venc)
-        log(f"  ✓ Data preenchida: {data_venc}")
     except Exception as e:
         log(f"  ! Erro ao preencher data: {e}")
-        diagnosticar_pagina(page, "sem_campo_data")
 
-    # ETAPA 7 — Clicar Gerar DAS
-    log("  → Clicando em Gerar DAS...")
+    # Clica em Gerar DAS
     btn_gerar = encontrar_botao(page, ["Gerar DAS","Apurar/Gerar DAS","Apurar","Gerar","Emitir DAS","Emitir"])
     if not btn_gerar:
         try:
@@ -285,19 +382,14 @@ def baixar_das(page, cnpj: str, pasta: Path) -> Path | None:
             pass
     if not btn_gerar:
         log("  ✗ Botão Gerar DAS não encontrado.")
-        diagnosticar_pagina(page, "sem_botao_gerar")
         return None
-
-    nome_arquivo = f"DAS_{cnpj_limpo}_{ano_competencia}{mes_competencia:02d}.pdf"
-    caminho_arquivo = pasta / nome_arquivo
 
     espera_humana(0.5, 1.0)
     btn_gerar.click()
     page.wait_for_load_state("domcontentloaded", timeout=20000)
     espera_humana(2, 3)
 
-    # ETAPA 8 — Clicar Imprimir/Visualizar PDF e baixar
-    log("  → Procurando botão Imprimir/Visualizar PDF...")
+    # Clica em Imprimir/Visualizar PDF
     btn_pdf = encontrar_botao(page, [
         "Imprimir/Visualizar PDF","Imprimir / Visualizar PDF",
         "Visualizar PDF","Imprimir PDF","Imprimir","PDF"
@@ -307,59 +399,60 @@ def baixar_das(page, cnpj: str, pasta: Path) -> Path | None:
         diagnosticar_pagina(page, "sem_botao_pdf")
         return None
 
+    # Tenta download direto
     try:
         with page.expect_download(timeout=30000) as dl_info:
             btn_pdf.click()
-        dl_info.value.save_as(str(caminho_arquivo))
-        log(f"  ✓ DAS salvo em: {caminho_arquivo}")
-        return caminho_arquivo
+        dl_info.value.save_as(str(caminho))
+        log(f"  ✓ PDF salvo: {caminho.name}")
+        return caminho
     except Exception:
         pass
 
-    # Fallback: PDF abriu em nova aba
+    # Fallback: nova aba com PDF
     try:
         espera_humana(2, 3)
         paginas = page.context.pages
         aba_pdf = paginas[-1] if len(paginas) > 1 else page
         url_pdf = aba_pdf.url
-        log(f"  → PDF em nova aba: {url_pdf}")
         if "pdf" in url_pdf.lower():
-            cookies = page.context.cookies()
+            cookies   = page.context.cookies()
             cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
             req = urllib.request.Request(url_pdf, headers={
                 "Cookie": cookie_str,
                 "User-Agent": page.evaluate("navigator.userAgent"),
             })
             with urllib.request.urlopen(req, timeout=30) as resp:
-                caminho_arquivo.write_bytes(resp.read())
+                caminho.write_bytes(resp.read())
         else:
-            aba_pdf.pdf(path=str(caminho_arquivo))
-        log(f"  ✓ DAS salvo em: {caminho_arquivo}")
+            aba_pdf.pdf(path=str(caminho))
+        log(f"  ✓ PDF salvo: {caminho.name}")
         if len(paginas) > 1:
             aba_pdf.close()
-        return caminho_arquivo
+        return caminho
     except Exception as e:
         log(f"  ✗ Erro ao salvar PDF: {e}")
-        diagnosticar_pagina(page, "erro_salvar_pdf")
         return None
 
 
 # ── Envio de email ────────────────────────────────────────────────────────────
 
-def enviar_email(destinatario: str, nome_empresa: str, cnpj: str, arquivo: Path):
+def enviar_email(destinatario: str, nome_empresa: str, cnpj: str,
+                 arquivo: Path, competencia: str = None):
     remetente = os.getenv("EMAIL_REMETENTE")
-    senha = os.getenv("EMAIL_SENHA_APP")
+    senha     = os.getenv("EMAIL_SENHA_APP")
     if not remetente or not senha:
         log("  ✗ Credenciais de email não configuradas no .env")
         return
 
-    hoje = datetime.now()
-    competencia = f"12/{hoje.year-1}" if hoje.month == 1 else f"{hoje.month-1:02d}/{hoje.year}"
-    assunto = f"DAS-SIMEI {competencia} – {nome_empresa}"
+    if not competencia:
+        hoje = datetime.now()
+        competencia = f"12/{hoje.year-1}" if hoje.month == 1 else f"{hoje.month-1:02d}/{hoje.year}"
 
+    assunto = f"DAS-SIMEI {competencia} – {nome_empresa}"
     msg = MIMEMultipart("related")
-    msg["From"] = remetente
-    msg["To"] = destinatario
+    msg["From"]    = remetente
+    msg["To"]      = destinatario
     msg["Subject"] = assunto
 
     alternativa = MIMEMultipart("alternative")
@@ -372,17 +465,15 @@ def enviar_email(destinatario: str, nome_empresa: str, cnpj: str, arquivo: Path)
     alternativa.attach(MIMEText(corpo_texto, "plain", "utf-8"))
 
     assinatura_path = Path(__file__).parent / "assinatura.png"
-    tem_assinatura = assinatura_path.exists()
-    img_tag = '<img src="cid:assinatura" alt="Assinatura" style="max-width:580px; display:block;">' if tem_assinatura else ""
+    tem_assinatura  = assinatura_path.exists()
+    img_tag = '<img src="cid:assinatura" alt="Assinatura" style="max-width:580px;display:block;">' if tem_assinatura else ""
 
     corpo_html = f"""<html><body style="font-family:Arial,sans-serif;font-size:14px;color:#333;margin:0;padding:20px;">
       <p>Olá,</p>
       <p>Segue em anexo o <strong>DAS-SIMEI</strong> referente à competência
          <strong>{competencia}</strong> da empresa <strong>{nome_empresa}</strong>
          (CNPJ: {cnpj}).</p>
-      <br>
-      <p>Atenciosamente,</p>
-      {img_tag}
+      <br><p>Atenciosamente,</p>{img_tag}
     </body></html>"""
     alternativa.attach(MIMEText(corpo_html, "html", "utf-8"))
 
@@ -413,27 +504,20 @@ def enviar_email(destinatario: str, nome_empresa: str, cnpj: str, arquivo: Path)
 
 # ── Execução principal ────────────────────────────────────────────────────────
 
-def executar(empresas: list, pasta_downloads: Path, log_callback=None, parar_flag=None):
-    """
-    Chamado pelo app web ou pelo CLI.
-    empresas: lista de dicts com cnpj, nome, email
-    pasta_downloads: Path onde salvar os PDFs
-    log_callback: função chamada com cada mensagem de log
-    parar_flag: lista [False] — se virar [True], interrompe o loop
-    """
-    if log_callback:
-        set_log_func(log_callback)
+def executar(empresas: list, pasta_downloads: Path,
+             log_callback=None, parar_flag=None, pergunta_callback=None):
+    if log_callback:    set_log_func(log_callback)
+    if pergunta_callback: set_pergunta_func(pergunta_callback)
 
     pasta_downloads = Path(pasta_downloads)
     pasta_downloads.mkdir(parents=True, exist_ok=True)
 
     hoje = datetime.now()
-    mes = 12 if hoje.month == 1 else hoje.month - 1
-    ano = hoje.year - 1 if hoje.month == 1 else hoje.year
-    competencia = f"{mes:02d}/{ano}"
+    mes_padrao = 12 if hoje.month == 1 else hoje.month - 1
+    ano_padrao = hoje.year - 1 if hoje.month == 1 else hoje.year
 
     log(f"{'='*60}")
-    log(f"Bot DAS-SIMEI | Competência: {competencia}")
+    log(f"Bot DAS-SIMEI | Competência padrão: {mes_padrao:02d}/{ano_padrao}")
     log(f"Processando {len(empresas)} empresa(s)...")
     log(f"{'='*60}")
 
@@ -465,16 +549,84 @@ def executar(empresas: list, pasta_downloads: Path, log_callback=None, parar_fla
 
             try:
                 pasta = pasta_empresa(cnpj, pasta_downloads)
-                arquivo = baixar_das(page, cnpj, pasta)
 
-                if arquivo and arquivo.exists():
-                    log(f"  ✓ PDF gerado com sucesso.")
-                    if email:
-                        enviar_email(email, nome, cnpj, arquivo)
+                # Navega até a tabela
+                ok = navegar_ate_tabela(page, cnpj, ano_padrao)
+                if not ok:
+                    log(f"  ✗ Não foi possível acessar a tabela para {cnpj}.")
+                    continue
+
+                # Lê todos os meses da tabela
+                meses_tabela = ler_tabela_das(page)
+                atrasados    = [m for m in meses_tabela if m["atrasado"]]
+
+                # Tira screenshot da tabela
+                log("  📸 Capturando tabela de períodos...")
+                img_b64 = screenshot_base64(page)
+
+                # Se há meses atrasados, pergunta ao usuário
+                meses_extras = []
+                if atrasados:
+                    log(f"  ⚠️  {len(atrasados)} mês(es) com boleto(s) em aberto/atraso encontrado(s)!")
+                    for m in atrasados:
+                        log(f"     • {m['texto']} — {m['situacao']} — {m['total']}")
+
+                    resposta = perguntar({
+                        "tipo":      "boletos_abertos",
+                        "empresa":   nome,
+                        "cnpj":      cnpj,
+                        "screenshot": img_b64,
+                        "meses":     atrasados,
+                    })
+
+                    if resposta.get("emitir"):
+                        nums_selecionados = resposta.get("meses", [])
+                        meses_extras = [
+                            m for m in atrasados
+                            if m["num"] in nums_selecionados
+                        ]
+                        log(f"  ✓ Usuário selecionou {len(meses_extras)} mês(es) para emissão.")
                     else:
-                        log("  ! Sem email configurado para esta empresa.")
+                        log("  → Usuário optou por não emitir meses em atraso.")
                 else:
-                    log(f"  ✗ Falha ao gerar DAS para {cnpj}.")
+                    log("  ✓ Nenhum boleto em atraso encontrado.")
+
+                # Lista final de meses a emitir: selecionados pelo usuário + mês padrão
+                meses_emitir = list(meses_extras)
+                # Adiciona mês padrão se não estiver na lista
+                ja_tem_padrao = any(m["num"] == mes_padrao and m["ano"] == ano_padrao for m in meses_emitir)
+                if not ja_tem_padrao:
+                    meses_emitir.append({"num": mes_padrao, "ano": ano_padrao,
+                                         "texto": f"{MESES_PT[mes_padrao-1]}/{ano_padrao}"})
+
+                # Emite cada mês selecionado
+                for idx_mes, mes_info in enumerate(meses_emitir):
+                    if parar_flag and parar_flag[0]:
+                        break
+
+                    mes_num = mes_info["num"]
+                    mes_ano = mes_info["ano"]
+                    competencia_str = f"{mes_num:02d}/{mes_ano}"
+
+                    log(f"\n  📄 Emitindo {mes_info['texto']}...")
+
+                    # Se não é o primeiro mês, precisa voltar à tabela
+                    if idx_mes > 0:
+                        log("  → Voltando à tabela para próximo mês...")
+                        ok = navegar_ate_tabela(page, cnpj, mes_ano)
+                        if not ok:
+                            log(f"  ✗ Falha ao navegar de volta para {mes_info['texto']}.")
+                            continue
+
+                    arquivo = emitir_mes(page, cnpj, mes_num, mes_ano, pasta)
+
+                    if arquivo and arquivo.exists():
+                        log(f"  ✓ DAS {mes_info['texto']} gerado com sucesso.")
+                        if email:
+                            enviar_email(email, nome, cnpj, arquivo, competencia_str)
+                    else:
+                        log(f"  ✗ Falha ao gerar DAS de {mes_info['texto']}.")
+
             except Exception as e:
                 log(f"  ✗ Erro inesperado: {e}")
 
@@ -492,7 +644,6 @@ if __name__ == "__main__":
     import json
     p = Path("empresas.json")
     if p.exists():
-        empresas = json.loads(p.read_text(encoding="utf-8"))
-        executar(empresas, Path("DAS"))
+        executar(json.loads(p.read_text(encoding="utf-8")), Path("DAS"))
     else:
         print("empresas.json não encontrado.")

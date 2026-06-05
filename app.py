@@ -28,9 +28,13 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 
 # Estado global do processo
 estado = {
-    "rodando": False,
-    "parar": [False],
-    "log_queue": queue.Queue(),
+    "rodando":        False,
+    "parar":          [False],
+    "log_queue":      queue.Queue(),
+    # Pergunta/resposta interativa
+    "pergunta":       None,          # dict com dados da pergunta atual
+    "resposta_event": threading.Event(),  # sinaliza quando usuário respondeu
+    "resposta_dados": None,          # dict com a resposta do usuário
 }
 
 
@@ -151,10 +155,24 @@ def iniciar():
         estado["log_queue"].get_nowait()
 
     estado["rodando"] = True
-    estado["parar"]   = [False]
+    estado["parar"]         = [False]
+    estado["pergunta"]      = None
+    estado["resposta_dados"] = None
+    estado["resposta_event"].clear()
 
     def callback_log(msg):
         estado["log_queue"].put(msg)
+
+    def callback_pergunta(dados: dict) -> dict:
+        """Bot chama esta função quando encontra boletos em aberto. Bloqueia até resposta."""
+        estado["pergunta"]      = dados
+        estado["resposta_dados"] = None
+        estado["resposta_event"].clear()
+        # Notifica a UI via SSE
+        estado["log_queue"].put("__PERGUNTA__")
+        # Aguarda resposta do usuário (timeout 10 minutos)
+        estado["resposta_event"].wait(timeout=600)
+        return estado.get("resposta_dados") or {"emitir": False}
 
     def thread_bot():
         try:
@@ -163,9 +181,11 @@ def iniciar():
                 pasta_downloads=pasta,
                 log_callback=callback_log,
                 parar_flag=estado["parar"],
+                pergunta_callback=callback_pergunta,
             )
         finally:
-            estado["rodando"] = False
+            estado["rodando"]  = False
+            estado["pergunta"] = None
             estado["log_queue"].put("__FIM__")
 
     threading.Thread(target=thread_bot, daemon=True).start()
@@ -175,12 +195,53 @@ def iniciar():
 @app.route("/parar", methods=["POST"])
 def parar():
     estado["parar"][0] = True
+    # Desbloqueia pergunta pendente se houver
+    estado["resposta_dados"] = {"emitir": False}
+    estado["resposta_event"].set()
     return jsonify({"ok": True})
 
 
 @app.route("/status")
 def status():
     return jsonify({"rodando": estado["rodando"]})
+
+
+@app.route("/pergunta")
+def get_pergunta():
+    """Retorna a pergunta pendente (se houver) para a UI."""
+    p = estado.get("pergunta")
+    if not p:
+        return jsonify({"pendente": False})
+    # Não envia screenshot no polling — enviado separado
+    return jsonify({
+        "pendente":  True,
+        "empresa":   p.get("empresa"),
+        "cnpj":      p.get("cnpj"),
+        "meses":     p.get("meses", []),
+    })
+
+
+@app.route("/pergunta/screenshot")
+def get_screenshot():
+    """Retorna o screenshot da tabela como imagem PNG."""
+    p = estado.get("pergunta")
+    if not p or not p.get("screenshot"):
+        return "", 204
+    import base64
+    img_bytes = base64.b64decode(p["screenshot"])
+    from flask import send_file
+    from io import BytesIO
+    return send_file(BytesIO(img_bytes), mimetype="image/png")
+
+
+@app.route("/resposta", methods=["POST"])
+def post_resposta():
+    """Recebe a resposta do usuário e desbloqueia o bot."""
+    dados = request.json or {}
+    estado["resposta_dados"] = dados
+    estado["pergunta"]       = None
+    estado["resposta_event"].set()
+    return jsonify({"ok": True})
 
 
 @app.route("/log-stream")
