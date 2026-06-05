@@ -168,60 +168,83 @@ def diagnosticar_pagina(page, etapa: str):
 def ler_tabela_das(page) -> list[dict]:
     """
     Lê todas as linhas da tabela de períodos de apuração.
-    Retorna lista de dicts: {num, texto, situacao, principal, total, vencimento, atrasado}
+    Estrutura das colunas:
+      0: Checkbox + Mês   1: Apurado   2: Benefício INSS
+      3: Situação         4: Principal  5: Multa
+      6: Juros            7: Total      8: Data Vencimento
+      9: Data Acolhimento
     """
     meses = []
     try:
+        # Detecta índices das colunas pelo cabeçalho (mais robusto)
+        idx_mes       = 0
+        idx_situacao  = 3
+        idx_total     = 7
+        idx_venc      = 8
+
+        try:
+            headers = page.locator("thead th, thead td").all()
+            for i, h in enumerate(headers):
+                txt = h.inner_text().strip().lower()
+                if "situação" in txt or "situacao" in txt:
+                    idx_situacao = i
+                elif "total" in txt:
+                    idx_total = i
+                elif "vencimento" in txt:
+                    idx_venc = i
+        except Exception:
+            pass  # usa índices padrão
+
         linhas = page.locator("tbody tr").all()
         for linha in linhas:
             cels = linha.locator("td").all()
-            if len(cels) < 3:
+            if len(cels) < 4:
                 continue
             try:
-                # Coluna 0: checkbox + texto do mês
-                texto_periodo = cels[0].inner_text().strip()
-                # Extrai "Janeiro/2026" do texto
-                match = re.search(r"(\w+)/(\d{4})", texto_periodo)
+                # Coluna 0: extrai nome do mês (ex: "Janeiro/2026")
+                texto_cel0 = cels[idx_mes].inner_text().strip()
+                match = re.search(r"(Janeiro|Fevereiro|Março|Abril|Maio|Junho|"
+                                  r"Julho|Agosto|Setembro|Outubro|Novembro|Dezembro)"
+                                  r"[/\s]+(\d{4})", texto_cel0, re.IGNORECASE)
                 if not match:
                     continue
-                nome_mes_txt = match.group(1)
+                nome_mes_txt = match.group(1).capitalize()
                 ano_txt      = int(match.group(2))
-                if nome_mes_txt not in MESES_PT:
-                    continue
-                num_mes = MESES_PT.index(nome_mes_txt) + 1
+                num_mes      = MESES_PT.index(nome_mes_txt) + 1
 
-                # Situação (procura em todas as células)
-                situacao  = ""
-                principal = ""
-                total     = ""
-                vencimento = ""
-                for cel in cels:
-                    t = cel.inner_text().strip()
-                    if t in ("Devedor", "A Vencer", "Pago", "Em Aberto"):
-                        situacao = t
-                    elif re.match(r"R\$\s*[\d.,]+", t) and not principal:
-                        principal = t
-                    elif re.match(r"R\$\s*[\d.,]+", t):
-                        total = t
-                    elif re.match(r"\d{2}/\d{2}/\d{4}", t) and not vencimento:
-                        vencimento = t
+                # Coluna Situação
+                situacao = cels[idx_situacao].inner_text().strip() if idx_situacao < len(cels) else ""
 
-                atrasado = situacao in ("Devedor", "Em Aberto")
+                # Coluna Total
+                total = cels[idx_total].inner_text().strip() if idx_total < len(cels) else ""
+
+                # Coluna Data de Vencimento
+                vencimento = cels[idx_venc].inner_text().strip() if idx_venc < len(cels) else ""
+                # Valida formato de data
+                if not re.match(r"\d{2}/\d{2}/\d{4}", vencimento):
+                    vencimento = ""
+
+                atrasado = "devedor" in situacao.lower() or "aberto" in situacao.lower()
 
                 meses.append({
-                    "num":       num_mes,
-                    "ano":       ano_txt,
-                    "texto":     f"{nome_mes_txt}/{ano_txt}",
-                    "situacao":  situacao or "—",
-                    "principal": principal,
-                    "total":     total or principal,
+                    "num":        num_mes,
+                    "ano":        ano_txt,
+                    "texto":      f"{nome_mes_txt}/{ano_txt}",
+                    "situacao":   situacao or "—",
+                    "total":      total,
                     "vencimento": vencimento,
-                    "atrasado":  atrasado,
+                    "atrasado":   atrasado,
                 })
+
+                if atrasado:
+                    log(f"  ⚠️  {nome_mes_txt}/{ano_txt} — {situacao} — {total} — venc. {vencimento}")
+
             except Exception:
                 continue
     except Exception as e:
         log(f"  ! Erro ao ler tabela: {e}")
+
+    log(f"  → {len(meses)} mês(es) lido(s), {sum(1 for m in meses if m['atrasado'])} em atraso.")
     return meses
 
 
