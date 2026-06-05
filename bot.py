@@ -168,61 +168,84 @@ def diagnosticar_pagina(page, etapa: str):
 def ler_tabela_das(page) -> list[dict]:
     """
     Lê todas as linhas da tabela de períodos de apuração.
-    Estrutura das colunas:
-      0: Checkbox + Mês   1: Apurado   2: Benefício INSS
-      3: Situação         4: Principal  5: Multa
-      6: Juros            7: Total      8: Data Vencimento
-      9: Data Acolhimento
     """
     meses = []
     try:
-        # Detecta índices das colunas pelo cabeçalho (mais robusto)
-        idx_mes       = 0
-        idx_situacao  = 3
-        idx_total     = 7
-        idx_venc      = 8
-
+        # ── DIAGNÓSTICO: imprime cabeçalhos encontrados ───────────────────
+        log("  🔍 [DIAG] Lendo cabeçalhos da tabela...")
+        headers_txt = []
         try:
-            headers = page.locator("thead th, thead td").all()
-            for i, h in enumerate(headers):
-                txt = h.inner_text().strip().lower()
-                if "situação" in txt or "situacao" in txt:
-                    idx_situacao = i
-                elif "total" in txt:
-                    idx_total = i
-                elif "vencimento" in txt:
-                    idx_venc = i
-        except Exception:
-            pass  # usa índices padrão
+            hs = page.locator("thead th, thead td").all()
+            for i, h in enumerate(hs):
+                t = h.inner_text().strip().replace("\n", " ")
+                headers_txt.append(t)
+                log(f"     col[{i}] = '{t}'")
+        except Exception as e:
+            log(f"     ! Erro ao ler cabeçalhos: {e}")
 
+        # ── Detecta índices pelos cabeçalhos ─────────────────────────────
+        idx_mes      = 0
+        idx_situacao = None
+        idx_total    = None
+        idx_venc     = None
+
+        for i, txt in enumerate(headers_txt):
+            tl = txt.lower()
+            if "situa" in tl:
+                idx_situacao = i
+            elif "total" in tl:
+                idx_total = i
+            elif "vencimento" in tl:
+                idx_venc = i
+
+        # Fallback para índices padrão observados no portal
+        if idx_situacao is None: idx_situacao = 3
+        if idx_total    is None: idx_total    = 7
+        if idx_venc     is None: idx_venc     = 8
+
+        log(f"  🔍 [DIAG] Índices usados → situação:{idx_situacao} total:{idx_total} venc:{idx_venc}")
+
+        # ── DIAGNÓSTICO: imprime todas as linhas encontradas ─────────────
         linhas = page.locator("tbody tr").all()
-        for linha in linhas:
+        log(f"  🔍 [DIAG] {len(linhas)} linha(s) encontrada(s) em tbody")
+
+        for idx_linha, linha in enumerate(linhas):
             cels = linha.locator("td").all()
-            if len(cels) < 4:
+            if len(cels) < 2:
                 continue
+
+            # Imprime todas as células desta linha para diagnóstico
+            cels_txt = [c.inner_text().strip().replace("\n", " ") for c in cels]
+            log(f"  🔍 [DIAG] linha[{idx_linha}]: {cels_txt}")
+
             try:
-                # Coluna 0: extrai nome do mês (ex: "Janeiro/2026")
-                texto_cel0 = cels[idx_mes].inner_text().strip()
-                match = re.search(r"(Janeiro|Fevereiro|Março|Abril|Maio|Junho|"
-                                  r"Julho|Agosto|Setembro|Outubro|Novembro|Dezembro)"
-                                  r"[/\s]+(\d{4})", texto_cel0, re.IGNORECASE)
+                # Extrai mês da coluna 0
+                texto_cel0 = cels_txt[idx_mes] if idx_mes < len(cels_txt) else ""
+                match = re.search(
+                    r"(Janeiro|Fevereiro|Mar[çc]o|Abril|Maio|Junho|"
+                    r"Julho|Agosto|Setembro|Outubro|Novembro|Dezembro)"
+                    r"[/\s]+(\d{4})",
+                    texto_cel0, re.IGNORECASE
+                )
                 if not match:
                     continue
-                nome_mes_txt = match.group(1).capitalize()
-                ano_txt      = int(match.group(2))
-                num_mes      = MESES_PT.index(nome_mes_txt) + 1
 
-                # Coluna Situação
-                situacao = cels[idx_situacao].inner_text().strip() if idx_situacao < len(cels) else ""
+                nome_mes_txt = match.group(1)
+                # Normaliza "Marco" → "Março"
+                nome_mes_txt = nome_mes_txt.replace("Marco","Março").capitalize()
+                ano_txt  = int(match.group(2))
+                num_mes  = MESES_PT.index(nome_mes_txt) + 1
 
-                # Coluna Total
-                total = cels[idx_total].inner_text().strip() if idx_total < len(cels) else ""
+                situacao   = cels_txt[idx_situacao] if idx_situacao < len(cels_txt) else ""
+                total      = cels_txt[idx_total]    if idx_total    < len(cels_txt) else ""
+                vencimento = cels_txt[idx_venc]     if idx_venc     < len(cels_txt) else ""
 
-                # Coluna Data de Vencimento
-                vencimento = cels[idx_venc].inner_text().strip() if idx_venc < len(cels) else ""
-                # Valida formato de data
                 if not re.match(r"\d{2}/\d{2}/\d{4}", vencimento):
-                    vencimento = ""
+                    # Procura data em qualquer célula
+                    for ct in cels_txt:
+                        if re.match(r"\d{2}/\d{2}/\d{4}", ct):
+                            vencimento = ct
+                            break
 
                 atrasado = "devedor" in situacao.lower() or "aberto" in situacao.lower()
 
@@ -236,15 +259,18 @@ def ler_tabela_das(page) -> list[dict]:
                     "atrasado":   atrasado,
                 })
 
-                if atrasado:
-                    log(f"  ⚠️  {nome_mes_txt}/{ano_txt} — {situacao} — {total} — venc. {vencimento}")
+                status_icon = "⚠️ " if atrasado else "✓"
+                log(f"  {status_icon} {nome_mes_txt}/{ano_txt} | {situacao} | {total} | venc: {vencimento}")
 
-            except Exception:
+            except Exception as ex:
+                log(f"  ! Erro na linha {idx_linha}: {ex}")
                 continue
-    except Exception as e:
-        log(f"  ! Erro ao ler tabela: {e}")
 
-    log(f"  → {len(meses)} mês(es) lido(s), {sum(1 for m in meses if m['atrasado'])} em atraso.")
+    except Exception as e:
+        log(f"  ! Erro geral ao ler tabela: {e}")
+
+    atrasados = sum(1 for m in meses if m["atrasado"])
+    log(f"  → {len(meses)} mês(es) lido(s) | {atrasados} em atraso/devedor")
     return meses
 
 
