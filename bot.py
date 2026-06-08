@@ -571,8 +571,9 @@ def enviar_email(destinatario: str, nome_empresa: str, cnpj: str,
 
     corpo_texto = (
         f"Olá,\n\n"
-        f"Segue em anexo o DAS-SIMEI referente à competência {competencia} "
-        f"da empresa {nome_empresa} (CNPJ: {cnpj})."
+        f"O DAS-SIMEI referente à competência {competencia} da empresa "
+        f"{nome_empresa} (CNPJ: {cnpj}) foi gerado com sucesso.\n"
+        f"O arquivo PDF está em anexo a este email."
         f"{aviso_txt}\n\n"
         f"Atenciosamente,\nTesserato Contabilidade"
     )
@@ -626,9 +627,19 @@ def enviar_email(destinatario: str, nome_empresa: str, cnpj: str,
     corpo_html = f"""
     <html><body style="font-family:Arial,sans-serif;font-size:14px;color:#333;margin:0;padding:24px;max-width:640px;">
       <p>Olá,</p>
-      <p>Segue em anexo o <strong>DAS-SIMEI</strong> referente à competência
+      <p>O <strong>DAS-SIMEI</strong> referente à competência
          <strong>{competencia}</strong> da empresa <strong>{nome_empresa}</strong>
-         (CNPJ: {cnpj}).</p>
+         (CNPJ: {cnpj}) foi gerado com sucesso e segue em anexo a este email.</p>
+      <div style="background:#f0fdf4;border:1.5px solid #86efac;border-radius:8px;
+                  padding:12px 16px;margin:16px 0;display:flex;align-items:center;gap:10px;">
+        <span style="font-size:1.3rem;">✅</span>
+        <div>
+          <strong style="color:#166534;">DAS emitido — Competência {competencia}</strong><br>
+          <span style="font-size:.82rem;color:#15803d;">
+            Arquivo em anexo: <strong>DAS_{limpar_cnpj(cnpj)}_{competencia.replace('/','')[:6].replace('/','')}... .pdf</strong>
+          </span>
+        </div>
+      </div>
       {bloco_atraso}
       <p>Atenciosamente,</p>
       {img_tag}
