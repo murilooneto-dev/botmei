@@ -528,7 +528,8 @@ def emitir_mes(page, cnpj: str, mes: int, ano: int, pasta: Path) -> Path | None:
 # ── Envio de email ────────────────────────────────────────────────────────────
 
 def enviar_email(destinatario: str, nome_empresa: str, cnpj: str,
-                 arquivo: Path, competencia: str = None):
+                 arquivo: Path, competencia: str = None,
+                 atrasados: list = None):
     remetente = os.getenv("EMAIL_REMETENTE")
     senha     = os.getenv("EMAIL_SENHA_APP")
     if not remetente or not senha:
@@ -539,7 +540,13 @@ def enviar_email(destinatario: str, nome_empresa: str, cnpj: str,
         hoje = datetime.now()
         competencia = f"12/{hoje.year-1}" if hoje.month == 1 else f"{hoje.month-1:02d}/{hoje.year}"
 
+    atrasados = atrasados or []
+    tem_atraso = len(atrasados) > 0
+
     assunto = f"DAS-SIMEI {competencia} – {nome_empresa}"
+    if tem_atraso:
+        assunto += f" ⚠️ {len(atrasados)} boleto(s) em atraso"
+
     msg = MIMEMultipart("related")
     msg["From"]    = remetente
     msg["To"]      = destinatario
@@ -548,25 +555,87 @@ def enviar_email(destinatario: str, nome_empresa: str, cnpj: str,
     alternativa = MIMEMultipart("alternative")
     msg.attach(alternativa)
 
+    # ── Versão texto simples ──────────────────────────────────────────────
+    aviso_txt = ""
+    if tem_atraso:
+        linhas = [f"  - {m['texto']}: {m['situacao']} | Total: {m['total']} | Vencimento: {m['vencimento']}"
+                  for m in atrasados]
+        aviso_txt = (
+            f"\n\n{'='*50}\n"
+            f"⚠️  ATENÇÃO — BOLETOS EM ATRASO\n"
+            f"{'='*50}\n"
+            f"Identificamos {len(atrasados)} mês(es) com DAS em aberto/atraso:\n\n"
+            + "\n".join(linhas) +
+            f"\n\nRegularize o quanto antes para evitar multas adicionais.\n{'='*50}"
+        )
+
     corpo_texto = (
-        f"Olá,\n\nSegue em anexo o DAS-SIMEI referente à competência {competencia} "
-        f"da empresa {nome_empresa} (CNPJ: {cnpj}).\n\nAtenciosamente,\nTesserato Contabilidade"
+        f"Olá,\n\n"
+        f"Segue em anexo o DAS-SIMEI referente à competência {competencia} "
+        f"da empresa {nome_empresa} (CNPJ: {cnpj})."
+        f"{aviso_txt}\n\n"
+        f"Atenciosamente,\nTesserato Contabilidade"
     )
     alternativa.attach(MIMEText(corpo_texto, "plain", "utf-8"))
 
+    # ── Versão HTML ───────────────────────────────────────────────────────
     assinatura_path = Path(__file__).parent / "assinatura.png"
     tem_assinatura  = assinatura_path.exists()
-    img_tag = '<img src="cid:assinatura" alt="Assinatura" style="max-width:580px;display:block;">' if tem_assinatura else ""
+    img_tag = '<img src="cid:assinatura" alt="Assinatura" style="max-width:580px;display:block;margin-top:24px;">' if tem_assinatura else ""
 
-    corpo_html = f"""<html><body style="font-family:Arial,sans-serif;font-size:14px;color:#333;margin:0;padding:20px;">
+    bloco_atraso = ""
+    if tem_atraso:
+        linhas_html = "".join(
+            f"""<tr>
+                  <td style="padding:8px 12px;border-bottom:1px solid #fecaca;font-weight:600;">{m['texto']}</td>
+                  <td style="padding:8px 12px;border-bottom:1px solid #fecaca;color:#c53030;font-weight:700;">{m['situacao']}</td>
+                  <td style="padding:8px 12px;border-bottom:1px solid #fecaca;">{m['total']}</td>
+                  <td style="padding:8px 12px;border-bottom:1px solid #fecaca;">{m['vencimento']}</td>
+                </tr>"""
+            for m in atrasados
+        )
+        bloco_atraso = f"""
+        <div style="margin:24px 0;border:2px solid #fc8181;border-radius:10px;overflow:hidden;">
+          <div style="background:#c53030;color:#fff;padding:12px 18px;display:flex;align-items:center;gap:10px;">
+            <span style="font-size:1.3rem;">⚠️</span>
+            <div>
+              <strong style="font-size:.95rem;">ATENÇÃO — BOLETOS EM ATRASO</strong><br>
+              <span style="font-size:.82rem;opacity:.9;">
+                Identificamos {len(atrasados)} mês(es) com DAS em aberto/atraso para {nome_empresa}.
+              </span>
+            </div>
+          </div>
+          <div style="padding:16px 18px;background:#fff5f5;">
+            <table style="width:100%;border-collapse:collapse;font-size:.88rem;">
+              <thead>
+                <tr style="background:#fee2e2;">
+                  <th style="padding:8px 12px;text-align:left;color:#7f1d1d;">Mês</th>
+                  <th style="padding:8px 12px;text-align:left;color:#7f1d1d;">Situação</th>
+                  <th style="padding:8px 12px;text-align:left;color:#7f1d1d;">Total</th>
+                  <th style="padding:8px 12px;text-align:left;color:#7f1d1d;">Vencimento</th>
+                </tr>
+              </thead>
+              <tbody>{linhas_html}</tbody>
+            </table>
+            <p style="margin:12px 0 0;font-size:.82rem;color:#9b1c1c;">
+              ⚠️ Regularize o quanto antes para evitar o aumento de multas e juros.
+            </p>
+          </div>
+        </div>"""
+
+    corpo_html = f"""
+    <html><body style="font-family:Arial,sans-serif;font-size:14px;color:#333;margin:0;padding:24px;max-width:640px;">
       <p>Olá,</p>
       <p>Segue em anexo o <strong>DAS-SIMEI</strong> referente à competência
          <strong>{competencia}</strong> da empresa <strong>{nome_empresa}</strong>
          (CNPJ: {cnpj}).</p>
-      <br><p>Atenciosamente,</p>{img_tag}
+      {bloco_atraso}
+      <p>Atenciosamente,</p>
+      {img_tag}
     </body></html>"""
     alternativa.attach(MIMEText(corpo_html, "html", "utf-8"))
 
+    # ── Assinatura inline ─────────────────────────────────────────────────
     if tem_assinatura:
         with open(assinatura_path, "rb") as f:
             img = MIMEBase("image", "png")
@@ -576,6 +645,7 @@ def enviar_email(destinatario: str, nome_empresa: str, cnpj: str,
         img.add_header("Content-Disposition", "inline", filename="assinatura.png")
         msg.attach(img)
 
+    # ── PDF em anexo ──────────────────────────────────────────────────────
     with open(arquivo, "rb") as f:
         part = MIMEBase("application", "octet-stream")
         part.set_payload(f.read())
@@ -588,6 +658,8 @@ def enviar_email(destinatario: str, nome_empresa: str, cnpj: str,
             s.login(remetente, senha)
             s.sendmail(remetente, destinatario, msg.as_string())
         log(f"  ✓ Email enviado para {destinatario}")
+        if tem_atraso:
+            log(f"  ⚠️  Email inclui aviso de {len(atrasados)} boleto(s) em atraso.")
     except Exception as e:
         log(f"  ✗ Falha ao enviar email: {e}")
 
@@ -596,18 +668,17 @@ def enviar_email(destinatario: str, nome_empresa: str, cnpj: str,
 
 def executar(empresas: list, pasta_downloads: Path,
              log_callback=None, parar_flag=None, pergunta_callback=None):
-    if log_callback:    set_log_func(log_callback)
-    if pergunta_callback: set_pergunta_func(pergunta_callback)
+    if log_callback: set_log_func(log_callback)
 
     pasta_downloads = Path(pasta_downloads)
     pasta_downloads.mkdir(parents=True, exist_ok=True)
 
-    hoje = datetime.now()
+    hoje       = datetime.now()
     mes_padrao = 12 if hoje.month == 1 else hoje.month - 1
     ano_padrao = hoje.year - 1 if hoje.month == 1 else hoje.year
 
     log(f"{'='*60}")
-    log(f"Bot DAS-SIMEI | Competência padrão: {mes_padrao:02d}/{ano_padrao}")
+    log(f"Bot DAS-SIMEI | Competência: {mes_padrao:02d}/{ano_padrao}")
     log(f"Processando {len(empresas)} empresa(s)...")
     log(f"{'='*60}")
 
@@ -641,84 +712,38 @@ def executar(empresas: list, pasta_downloads: Path,
                 pasta = pasta_empresa(cnpj, pasta_downloads)
 
                 # Navega até a tabela
-                ok = navegar_ate_tabela(page, cnpj, ano_padrao)
-                if not ok:
-                    log(f"  ✗ Não foi possível acessar a tabela para {cnpj}.")
+                if not navegar_ate_tabela(page, cnpj, ano_padrao):
+                    log(f"  ✗ Não foi possível acessar a tabela.")
                     continue
 
-                # Lê todos os meses da tabela
+                # Lê tabela e identifica atrasados
                 meses_tabela = ler_tabela_das(page)
                 atrasados    = [m for m in meses_tabela if m["atrasado"]]
 
-                # Tira screenshot da tabela
-                log("  📸 Capturando tabela de períodos...")
-                img_b64 = screenshot_base64(page)
-
-                # Se há meses atrasados, pergunta ao usuário
-                meses_extras = []
                 if atrasados:
-                    log(f"  ⚠️  {len(atrasados)} mês(es) com boleto(s) em aberto/atraso encontrado(s)!")
-                    for m in atrasados:
-                        log(f"     • {m['texto']} — {m['situacao']} — {m['total']}")
-
-                    resposta = perguntar({
-                        "tipo":      "boletos_abertos",
-                        "empresa":   nome,
-                        "cnpj":      cnpj,
-                        "screenshot": img_b64,
-                        "meses":     atrasados,
-                    })
-
-                    if resposta.get("emitir"):
-                        nums_selecionados = resposta.get("meses", [])
-                        meses_extras = [
-                            m for m in atrasados
-                            if m["num"] in nums_selecionados
-                        ]
-                        log(f"  ✓ Usuário selecionou {len(meses_extras)} mês(es) para emissão.")
-                    else:
-                        log("  → Usuário optou por não emitir meses em atraso.")
+                    log(f"  ⚠️  {len(atrasados)} boleto(s) em atraso — serão informados no email.")
                 else:
-                    log("  ✓ Nenhum boleto em atraso encontrado.")
+                    log("  ✓ Nenhum boleto em atraso.")
 
-                # Lista final de meses a emitir: selecionados pelo usuário + mês padrão
-                meses_emitir = list(meses_extras)
-                # Adiciona mês padrão se não estiver na lista
-                ja_tem_padrao = any(m["num"] == mes_padrao and m["ano"] == ano_padrao for m in meses_emitir)
-                if not ja_tem_padrao:
-                    meses_emitir.append({"num": mes_padrao, "ano": ano_padrao,
-                                         "texto": f"{MESES_PT[mes_padrao-1]}/{ano_padrao}"})
+                # Emite o mês padrão (mês anterior)
+                competencia_str = f"{mes_padrao:02d}/{ano_padrao}"
+                log(f"\n  📄 Emitindo {MESES_PT[mes_padrao-1]}/{ano_padrao}...")
+                arquivo = emitir_mes(page, cnpj, mes_padrao, ano_padrao, pasta)
 
-                # Emite cada mês selecionado
-                for idx_mes, mes_info in enumerate(meses_emitir):
-                    if parar_flag and parar_flag[0]:
-                        break
-
-                    mes_num = mes_info["num"]
-                    mes_ano = mes_info["ano"]
-                    competencia_str = f"{mes_num:02d}/{mes_ano}"
-
-                    log(f"\n  📄 Emitindo {mes_info['texto']}...")
-
-                    # A partir do 2º mês: volta via botão Voltar (mais rápido)
-                    if idx_mes > 0:
-                        ok = voltar_para_tabela(page, mes_ano)
-                        if not ok:
-                            # Fallback: refaz navegação completa
-                            log("  ! Botão Voltar falhou, refazendo navegação completa...")
-                            ok = navegar_ate_tabela(page, cnpj, mes_ano)
-                        if not ok:
-                            log(f"  ✗ Falha ao retornar para {mes_info['texto']}.")
-                            continue
-
-                    arquivo = emitir_mes(page, cnpj, mes_num, mes_ano, pasta)
-
-                    if arquivo and arquivo.exists():
-                        log(f"  ✓ DAS {mes_info['texto']} gerado com sucesso.")
-                        if email:
-                            enviar_email(email, nome, cnpj, arquivo, competencia_str)
+                if arquivo and arquivo.exists():
+                    log(f"  ✓ DAS gerado com sucesso.")
+                    if email:
+                        # Envia email com DAS + aviso de atrasados (se houver)
+                        enviar_email(email, nome, cnpj, arquivo,
+                                     competencia_str, atrasados)
                     else:
-                        log(f"  ✗ Falha ao gerar DAS de {mes_info['texto']}.")
+                        log("  ! Sem email configurado para esta empresa.")
+                else:
+                    log(f"  ✗ Falha ao gerar DAS.")
+                    # Mesmo sem PDF, envia aviso de atraso se houver
+                    if atrasados and email:
+                        log("  → Enviando apenas o aviso de atraso por email...")
+                        _enviar_apenas_aviso(email, nome, cnpj, competencia_str, atrasados)
 
             except Exception as e:
                 log(f"  ✗ Erro inesperado: {e}")
@@ -731,6 +756,48 @@ def executar(empresas: list, pasta_downloads: Path,
     log(f"\n{'='*60}")
     log(f"✅ Concluído! Arquivos em: {pasta_downloads.resolve()}")
     log(f"{'='*60}")
+
+
+def _enviar_apenas_aviso(destinatario, nome_empresa, cnpj, competencia, atrasados):
+    """Envia email de aviso sem PDF em anexo (quando geração do DAS falha)."""
+    remetente = os.getenv("EMAIL_REMETENTE")
+    senha     = os.getenv("EMAIL_SENHA_APP")
+    if not remetente or not senha:
+        return
+    try:
+        from email.mime.text import MIMEText
+        linhas_html = "".join(
+            f"<tr><td style='padding:7px 12px;border-bottom:1px solid #fecaca;font-weight:600'>{m['texto']}</td>"
+            f"<td style='padding:7px 12px;border-bottom:1px solid #fecaca;color:#c53030;font-weight:700'>{m['situacao']}</td>"
+            f"<td style='padding:7px 12px;border-bottom:1px solid #fecaca'>{m['total']}</td>"
+            f"<td style='padding:7px 12px;border-bottom:1px solid #fecaca'>{m['vencimento']}</td></tr>"
+            for m in atrasados
+        )
+        html = f"""<html><body style="font-family:Arial,sans-serif;font-size:14px;color:#333;padding:24px">
+          <p>Olá,</p>
+          <p>Identificamos boletos em atraso para a empresa <strong>{nome_empresa}</strong> (CNPJ: {cnpj}):</p>
+          <table style="width:100%;border-collapse:collapse;font-size:.88rem;border:2px solid #fc8181;border-radius:8px;overflow:hidden">
+            <thead><tr style="background:#fee2e2">
+              <th style="padding:8px 12px;text-align:left;color:#7f1d1d">Mês</th>
+              <th style="padding:8px 12px;text-align:left;color:#7f1d1d">Situação</th>
+              <th style="padding:8px 12px;text-align:left;color:#7f1d1d">Total</th>
+              <th style="padding:8px 12px;text-align:left;color:#7f1d1d">Vencimento</th>
+            </tr></thead>
+            <tbody>{linhas_html}</tbody>
+          </table>
+          <p style="color:#9b1c1c;margin-top:12px">⚠️ Regularize o quanto antes para evitar multas adicionais.</p>
+        </body></html>"""
+        msg = MIMEMultipart("alternative")
+        msg["From"]    = remetente
+        msg["To"]      = destinatario
+        msg["Subject"] = f"⚠️ Boletos em Atraso — {nome_empresa} ({competencia})"
+        msg.attach(MIMEText(html, "html", "utf-8"))
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
+            s.login(remetente, senha)
+            s.sendmail(remetente, destinatario, msg.as_string())
+        log(f"  ✓ Aviso de atraso enviado para {destinatario}")
+    except Exception as e:
+        log(f"  ✗ Falha ao enviar aviso: {e}")
 
 
 if __name__ == "__main__":

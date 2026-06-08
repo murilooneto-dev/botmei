@@ -212,86 +212,6 @@
     .progress-bar { height: 100%; background: linear-gradient(90deg,var(--teal),var(--azul));
                     width: 0%; transition: width .4s; }
 
-    /* MODAL BOLETOS EM ABERTO */
-    .modal-overlay {
-      display: none; position: fixed; inset: 0;
-      background: rgba(0,0,0,.55); z-index: 1000;
-      align-items: center; justify-content: center;
-    }
-    .modal-overlay.show { display: flex; }
-    .modal {
-      background: var(--branco); border-radius: 16px;
-      width: 90%; max-width: 780px; max-height: 90vh;
-      display: flex; flex-direction: column;
-      box-shadow: 0 20px 60px rgba(0,0,0,.3); overflow: hidden;
-    }
-    .modal-header {
-      background: linear-gradient(135deg, #c53030, #e53e3e);
-      color: #fff; padding: 18px 24px;
-      display: flex; align-items: center; gap: 12px;
-    }
-    .modal-header .icon { font-size: 1.6rem; }
-    .modal-header h2 { font-size: 1.1rem; font-weight: 700; }
-    .modal-header p  { font-size: .83rem; opacity: .9; margin-top: 2px; }
-    .modal-body { padding: 20px 24px; overflow-y: auto; flex: 1; }
-    .modal-screenshot {
-      width: 100%; border-radius: 10px; border: 1px solid var(--cinza2);
-      margin-bottom: 16px; max-height: 260px; object-fit: contain;
-      background: #f8f8f8;
-    }
-    .modal-pergunta {
-      font-size: .95rem; font-weight: 600; color: var(--texto);
-      margin-bottom: 14px;
-    }
-    .meses-lista { display: flex; flex-direction: column; gap: 8px; }
-    .mes-item {
-      display: flex; align-items: center; gap: 12px;
-      padding: 10px 14px; border: 1.5px solid var(--cinza2);
-      border-radius: 10px; cursor: pointer; transition: all .15s;
-      background: var(--cinza1);
-    }
-    .mes-item:hover  { border-color: var(--vermelho); background: #fff5f5; }
-    .mes-item.sel    { border-color: var(--vermelho); background: #fff0f0; }
-    .mes-item .cb-box-modal {
-      width: 20px; height: 20px; border: 2px solid var(--cinza3);
-      border-radius: 6px; flex-shrink: 0; display: flex;
-      align-items: center; justify-content: center; transition: all .15s;
-    }
-    .mes-item.sel .cb-box-modal {
-      background: var(--vermelho); border-color: var(--vermelho);
-    }
-    .mes-item.sel .cb-box-modal::after {
-      content: ''; width: 5px; height: 9px;
-      border: 2px solid #fff; border-top: none; border-left: none;
-      transform: rotate(45deg) translate(-1px,-1px); display: block;
-    }
-    .mes-item .mes-info { flex: 1; }
-    .mes-item .mes-nome { font-weight: 700; font-size: .9rem; }
-    .mes-item .mes-det  { font-size: .78rem; color: #888; margin-top: 2px; }
-    .mes-item .badge-atraso {
-      background: #fff0f0; color: var(--vermelho); padding: 3px 10px;
-      border-radius: 20px; font-size: .75rem; font-weight: 700;
-    }
-    .modal-footer {
-      padding: 16px 24px; border-top: 1px solid var(--cinza2);
-      display: flex; gap: 10px; justify-content: flex-end;
-      background: var(--cinza1);
-    }
-    .btn-modal-nao {
-      padding: 10px 22px; border: 1.5px solid var(--cinza2); border-radius: 9px;
-      background: var(--branco); font-size: .88rem; font-weight: 700;
-      cursor: pointer; transition: all .15s; color: #666;
-    }
-    .btn-modal-nao:hover { background: var(--cinza2); }
-    .btn-modal-sim {
-      padding: 10px 22px; border: none; border-radius: 9px;
-      background: var(--vermelho); color: #fff;
-      font-size: .88rem; font-weight: 700; cursor: pointer; transition: all .15s;
-    }
-    .btn-modal-sim:hover { background: #c53030; }
-    .btn-modal-sim:disabled { opacity: .4; cursor: not-allowed; }
-    .sel-mes-count { font-size: .82rem; color: var(--vermelho); font-weight: 600;
-                     align-self: center; margin-right: auto; }
   </style>
 </head>
 <body>
@@ -412,33 +332,6 @@
 </div>
 
 <div id="toast"></div>
-
-<!-- MODAL: Boletos em Aberto -->
-<div class="modal-overlay" id="modal-overlay">
-  <div class="modal">
-    <div class="modal-header">
-      <div class="icon">⚠️</div>
-      <div>
-        <h2 id="modal-titulo">Boletos em Aberto Encontrados</h2>
-        <p id="modal-subtitulo"></p>
-      </div>
-    </div>
-    <div class="modal-body">
-      <img class="modal-screenshot" id="modal-screenshot" src="" alt="Tabela DAS"/>
-      <p class="modal-pergunta">Deseja emitir o DAS para algum mês em aberto?<br>
-        <span style="font-size:.82rem;font-weight:400;color:#888;">Selecione os meses abaixo e clique em Emitir.</span>
-      </p>
-      <div class="meses-lista" id="meses-lista"></div>
-    </div>
-    <div class="modal-footer">
-      <span class="sel-mes-count" id="sel-mes-count"></span>
-      <button class="btn-modal-nao" onclick="responderModal(false)">Não emitir</button>
-      <button class="btn-modal-sim" id="btn-modal-sim" onclick="responderModal(true)" disabled>
-        ✅ Emitir Selecionados
-      </button>
-    </div>
-  </div>
-</div>
 
 <script>
   let empresasCarregadas = [];
@@ -655,78 +548,10 @@
         setTimeout(() => document.getElementById('progress-bar').style.width='0%', 2000);
         return;
       }
-      if (e.data === '__PERGUNTA__') {
-        carregarPergunta();
-        return;
-      }
       appendLog(e.data);
     };
   }
 
-  // ── Modal de Boletos em Aberto ────────────────────────────────────────────
-  let mesesPergunta = [];
-
-  async function carregarPergunta() {
-    const r = await fetch('/pergunta');
-    const d = await r.json();
-    if (!d.pendente) return;
-
-    mesesPergunta = d.meses || [];
-
-    document.getElementById('modal-titulo').textContent   = '⚠️ Boletos em Aberto — ' + d.empresa;
-    document.getElementById('modal-subtitulo').textContent = 'CNPJ: ' + formatCnpj(d.cnpj);
-    document.getElementById('modal-screenshot').src       = '/pergunta/screenshot?' + Date.now();
-
-    const lista = document.getElementById('meses-lista');
-    lista.innerHTML = '';
-    mesesPergunta.forEach(m => {
-      const div = document.createElement('div');
-      div.className = 'mes-item';
-      div.dataset.num = m.num;
-      div.innerHTML = `
-        <div class="cb-box-modal"></div>
-        <div class="mes-info">
-          <div class="mes-nome">${m.texto}</div>
-          <div class="mes-det">Vencimento: ${m.vencimento || '—'} &nbsp;|&nbsp; Total: ${m.total || '—'}</div>
-        </div>
-        <span class="badge-atraso">${m.situacao}</span>
-      `;
-      div.addEventListener('click', () => {
-        div.classList.toggle('sel');
-        atualizarSelMeses();
-      });
-      lista.appendChild(div);
-    });
-
-    atualizarSelMeses();
-    document.getElementById('modal-overlay').classList.add('show');
-    mudarTab('log', document.querySelectorAll('.tab')[1]);
-  }
-
-  function atualizarSelMeses() {
-    const sel = document.querySelectorAll('.mes-item.sel').length;
-    document.getElementById('sel-mes-count').textContent = sel > 0 ? `${sel} mês(es) selecionado(s)` : '';
-    document.getElementById('btn-modal-sim').disabled = sel === 0;
-  }
-
-  async function responderModal(emitir) {
-    let mesesSelecionados = [];
-    if (emitir) {
-      mesesSelecionados = Array.from(document.querySelectorAll('.mes-item.sel'))
-        .map(el => parseInt(el.dataset.num));
-    }
-    document.getElementById('modal-overlay').classList.remove('show');
-    await fetch('/resposta', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ emitir, meses: mesesSelecionados })
-    });
-    if (emitir) {
-      appendLog(`  ✓ Emissão confirmada para ${mesesSelecionados.length} mês(es) em atraso.`);
-    } else {
-      appendLog('  → Emissão de meses em atraso ignorada pelo usuário.');
-    }
-  }
 
   function appendLog(msg) {
     const box = document.getElementById('log-box');
